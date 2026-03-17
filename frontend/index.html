@@ -965,9 +965,10 @@ footer {
 .preview-topbar {
   background: var(--bg);
   border-bottom: 1px solid var(--border);
-  padding: 0 24px;
-  height: 60px;
-  display: flex; align-items: center; gap: 14px;
+  padding: 8px 24px;
+  min-height: 60px;
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
   position: sticky; top: 0; z-index: 100;
 }
 .preview-topbar-title {
@@ -3918,9 +3919,12 @@ function renderCV() {
 }
 
 function buildCVHTML(d) {
+  /* Photo: use raw src (base64 data URL) — do NOT escape through h()
+     as that would corrupt the data: URI. It is safe here because
+     this string only comes from the user's own file upload. */
   const photoHTML = d.photo
-    ? `<img src="${d.photo}" class="cv-photo" alt="Profile photo">`
-    : `<div class="cv-photo">👤</div>`;
+    ? '<img src="' + d.photo + '" class="cv-photo" alt="Profile photo" crossorigin="anonymous">'
+    : '<div class="cv-photo">👤</div>';
 
   const langs = (d.languages||'').split(',').map(l=>l.trim()).filter(Boolean);
   const certs = (d.certs||'').split('\n').map(c=>c.trim()).filter(Boolean);
@@ -4178,38 +4182,80 @@ Would you like to download for free while we fix this?`);
 function executePDFDownload(type) {
   if (type === 'bundle') {
     executePDFDownload('cv');
-    setTimeout(() => executePDFDownload('coverletter'), 2500);
+    setTimeout(() => executePDFDownload('coverletter'), 3000);
     return;
   }
 
-  const isCL   = type === 'coverletter';
-  const cvData = loadData('cvData') || {};
-  const clData = (() => { try { return JSON.parse(localStorage.getItem('folio_cover_letter')) || {}; } catch { return {}; } })();
-  const name   = (isCL ? clData.fullname : cvData.fullname || 'document').toLowerCase().replace(/\s+/g,'-');
+  const isCL    = type === 'coverletter';
+  const cvData  = loadData('cvData') || {};
+  const clData  = (() => { try { return JSON.parse(localStorage.getItem('folio_cover_letter')) || {}; } catch { return {}; } })();
+  const rawName = (isCL ? clData.fullname : cvData.fullname || 'document');
+  const name    = rawName.toLowerCase().replace(/\s+/g, '-');
   const element = document.getElementById(isCL ? 'cl-paper' : 'cv-paper');
-  const filename = isCL ? `${name}-cover-letter.pdf` : `${name}-cv.pdf`;
+  const filename = isCL ? (name + '-cover-letter.pdf') : (name + '-cv.pdf');
 
   if (!element) {
-    toast('Please open the ' + (isCL ? 'Cover Letter' : 'CV Preview') + ' page first.', 'error');
+    /* If element not in DOM, navigate to correct view then retry */
+    showView(isCL ? 'coverletter' : 'preview');
+    setTimeout(() => executePDFDownload(type), 800);
     return;
   }
 
-  if (typeof html2pdf !== 'undefined') {
-    toast('Preparing your PDF…', 'default', 2000);
-    html2pdf()
-      .set({
-        margin: 0,
-        filename,
-        image: { type:'jpeg', quality:0.98 },
-        html2canvas: { scale:2, useCORS:true },
-        jsPDF: { unit:'px', format:'a4', orientation:'portrait' },
-      })
-      .from(element)
-      .save()
-      .then(() => toast(`Downloaded: ${filename} ✦`, 'gold'));
-  } else {
+  if (typeof html2pdf === 'undefined') {
     window.print();
+    return;
   }
+
+  toast('Preparing your PDF…', 'default', 3000);
+
+  /* Clone element so we can safely manipulate it for export */
+  const clone = element.cloneNode(true);
+  clone.style.width   = '794px';
+  clone.style.margin  = '0';
+  clone.style.padding = isCL ? '0' : clone.style.padding;
+
+  /* For photos: convert any broken img src to inline if needed */
+  clone.querySelectorAll('img').forEach(img => {
+    if (img.src && img.src.startsWith('data:')) {
+      img.crossOrigin = 'anonymous';
+    }
+  });
+
+  /* Append off-screen for rendering */
+  clone.style.position = 'fixed';
+  clone.style.left     = '-9999px';
+  clone.style.top      = '0';
+  document.body.appendChild(clone);
+
+  html2pdf()
+    .set({
+      margin:     0,
+      filename:   filename,
+      image:      { type: 'jpeg', quality: 0.98 },
+      html2canvas: {
+        scale:       2,
+        useCORS:     true,
+        allowTaint:  true,
+        logging:     false,
+        windowWidth: 794,
+        onclone:     (doc) => {
+          /* Ensure cloned photos render */
+          doc.querySelectorAll('img').forEach(img => { img.crossOrigin = 'anonymous'; });
+        }
+      },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+    })
+    .from(clone)
+    .save()
+    .then(() => {
+      document.body.removeChild(clone);
+      toast('Downloaded: ' + filename + ' ✦', 'gold');
+    })
+    .catch(err => {
+      document.body.removeChild(clone);
+      toast('PDF error — trying fallback…', 'error');
+      setTimeout(() => window.print(), 500);
+    });
 }
 
 /* ============================================================
@@ -5383,16 +5429,28 @@ async function createPaymentIntent({ amount, company, title, plan, pendingId, em
   const finalReturnUrl = returnUrl || (MODEMPAY_CONFIG.RETURN_URL + '&job_id=' + encodeURIComponent(pendingId));
   const cancelUrl = MODEMPAY_CONFIG.CANCEL_URL;
 
+  /* ── Local file check ──────────────────────────────────────
+     If opened as file:// the browser blocks all fetch() calls
+     to external URLs. Payments only work when hosted online
+     (e.g. GitHub Pages, Netlify). Show a clear message.    */
+  if (window.location.protocol === 'file:') {
+    throw new Error(
+      'Payments require the app to be hosted online. ' +
+      'Upload index.html to GitHub Pages or Netlify first, ' +
+      'then payments will work automatically.'
+    );
+  }
+
   const res = await fetch(MODEMPAY_CONFIG.EDGE_FN, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SB_KEY}`,
+      'Authorization': 'Bearer ' + SB_KEY,
     },
     body: JSON.stringify({
       amount,
       currency: 'GMD',
-      return_url: returnUrl,
+      return_url: finalReturnUrl,
       cancel_url: cancelUrl,
       metadata: {
         job_title: title,
@@ -5408,7 +5466,7 @@ async function createPaymentIntent({ amount, company, title, plan, pendingId, em
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Edge Function error ${res.status}: ${errText}`);
+    throw new Error('Edge Function error ' + res.status + ': ' + errText);
   }
 
   const data = await res.json();
@@ -5442,10 +5500,12 @@ function showPaymentFallback(jobPayload, plan, amount, errMsg) {
       <div style="font-size:40px;margin-bottom:16px">💳</div>
       <h3 style="font-size:22px;margin-bottom:10px">${planLabel} — GMD ${amount}</h3>
       <p style="font-size:14px;color:var(--text2);line-height:1.7;margin-bottom:20px">
-        The payment gateway is not fully configured yet.
-        The Supabase Edge Function needs to be deployed with your ModemPay secret key.
+        ${errMsg.includes('hosted online') ?
+          'Payments only work when the app is hosted online. Upload your <strong style="color:var(--gold)">index.html</strong> to GitHub Pages or Netlify — it takes 5 minutes and is free. Once hosted, payments will work automatically.' :
+          'The payment gateway could not be reached. The Supabase Edge Function needs to be deployed with your ModemPay secret key.'
+        }
         <br><br>
-        <strong style="color:var(--gold)">Until then, you have two options:</strong>
+        <strong style="color:var(--gold)">In the meantime, you have two options:</strong>
       </p>
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:var(--radius);padding:14px;margin-bottom:20px;font-size:13px;color:var(--muted)">
         <strong style="color:var(--text2);display:block;margin-bottom:4px">Error detail (for developer):</strong>

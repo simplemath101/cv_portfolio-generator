@@ -5380,7 +5380,7 @@ async function createPaymentIntent({ amount, company, title, plan, pendingId, em
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   `);
 
-  const returnUrl = returnUrl || (MODEMPAY_CONFIG.RETURN_URL + '&job_id=' + encodeURIComponent(pendingId));
+  const finalReturnUrl = returnUrl || (MODEMPAY_CONFIG.RETURN_URL + '&job_id=' + encodeURIComponent(pendingId));
   const cancelUrl = MODEMPAY_CONFIG.CANCEL_URL;
 
   const res = await fetch(MODEMPAY_CONFIG.EDGE_FN, {

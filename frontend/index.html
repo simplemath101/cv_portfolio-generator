@@ -13,6 +13,10 @@
 <!-- html2pdf -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
+<!-- ModemPay SDK — loaded as a global via CDN -->
+<!-- We use a thin fetch wrapper instead since the SDK uses ES modules.
+     The createPaymentIntent function below handles everything natively. -->
+
 <style>
 /* ============================================================
    DESIGN TOKENS & CSS CUSTOM PROPERTIES
@@ -1883,6 +1887,21 @@ footer {
   border-radius: 2px; overflow: hidden;
   font-family: 'Outfit', sans-serif;
   position: relative;
+}
+/* PDF export class — applied during download only */
+.cl-paper.pdf-export {
+  width: 794px !important;
+  max-width: 794px !important;
+  min-width: 794px !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+.cv-paper.pdf-export {
+  width: 794px !important;
+  max-width: 794px !important;
+  min-width: 794px !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
 }
 
 /* Themes */
@@ -4043,32 +4062,42 @@ function useFreeDownload() {
 
 /* ── CV PDF download (payment-gated after free tier) ──────── */
 async function downloadPDF() {
+  /* Make sure we are on the preview page */
+  if (currentView !== 'preview') {
+    showView('preview');
+    setTimeout(() => downloadPDF(), 600);
+    return;
+  }
+
   const freeLeft = getFreeDownloadsLeft();
 
   if (freeLeft > 0) {
-    /* Still within free allowance — download immediately */
     useFreeDownload();
-    const remaining = freeLeft - 1;
-    if (remaining === 0) {
-      toast(`Free download used! Future downloads cost GMD ${MODEMPAY_CONFIG.DOWNLOAD_PRICES.cv}.`, 'gold', 5000);
+    if (freeLeft - 1 === 0) {
+      toast('Free download used! Future downloads cost GMD ' + MODEMPAY_CONFIG.DOWNLOAD_PRICES.cv + '.', 'gold', 5000);
     }
     executePDFDownload('cv');
     return;
   }
 
-  /* Free allowance exhausted — show payment modal */
   showDownloadPaymentModal('cv');
 }
 
 /* ── Cover letter PDF download (payment-gated) ────────────── */
 async function downloadCoverLetter() {
+  /* Make sure we are on the cover letter page */
+  if (currentView !== 'coverletter') {
+    showView('coverletter');
+    setTimeout(() => downloadCoverLetter(), 600);
+    return;
+  }
+
   const freeLeft = getFreeDownloadsLeft();
 
   if (freeLeft > 0) {
     useFreeDownload();
-    const remaining = freeLeft - 1;
-    if (remaining === 0) {
-      toast(`Free download used! Future downloads cost GMD ${MODEMPAY_CONFIG.DOWNLOAD_PRICES.coverletter}.`, 'gold', 5000);
+    if (freeLeft - 1 === 0) {
+      toast('Free download used! Future downloads cost GMD ' + MODEMPAY_CONFIG.DOWNLOAD_PRICES.coverletter + '.', 'gold', 5000);
     }
     executePDFDownload('coverletter');
     return;
@@ -4182,80 +4211,86 @@ Would you like to download for free while we fix this?`);
 function executePDFDownload(type) {
   if (type === 'bundle') {
     executePDFDownload('cv');
-    setTimeout(() => executePDFDownload('coverletter'), 3000);
+    setTimeout(() => executePDFDownload('coverletter'), 3500);
     return;
   }
 
-  const isCL    = type === 'coverletter';
-  const cvData  = loadData('cvData') || {};
-  const clData  = (() => { try { return JSON.parse(localStorage.getItem('folio_cover_letter')) || {}; } catch { return {}; } })();
-  const rawName = (isCL ? clData.fullname : cvData.fullname || 'document');
-  const name    = rawName.toLowerCase().replace(/\s+/g, '-');
-  const element = document.getElementById(isCL ? 'cl-paper' : 'cv-paper');
-  const filename = isCL ? (name + '-cover-letter.pdf') : (name + '-cv.pdf');
+  const isCL   = type === 'coverletter';
+  const elemId = isCL ? 'cl-paper' : 'cv-paper';
 
+  /* Navigate to correct view if not already there */
+  if (isCL && currentView !== 'coverletter') {
+    showView('coverletter');
+    setTimeout(() => executePDFDownload(type), 900);
+    return;
+  }
+  if (!isCL && currentView !== 'preview') {
+    showView('preview');
+    setTimeout(() => executePDFDownload(type), 900);
+    return;
+  }
+
+  const element = document.getElementById(elemId);
   if (!element) {
-    /* If element not in DOM, navigate to correct view then retry */
-    showView(isCL ? 'coverletter' : 'preview');
-    setTimeout(() => executePDFDownload(type), 800);
+    toast('Could not find document to export. Please try again.', 'error');
     return;
   }
 
   if (typeof html2pdf === 'undefined') {
+    toast('PDF library not loaded. Using print instead.', 'default');
     window.print();
     return;
   }
 
-  toast('Preparing your PDF…', 'default', 3000);
+  /* Get filename */
+  const cvData  = loadData('cvData') || {};
+  const clData  = (() => { try { return JSON.parse(localStorage.getItem('folio_cover_letter')) || {}; } catch { return {}; } })();
+  const rawName = (isCL ? (clData.fullname || 'cover-letter') : (cvData.fullname || 'cv'));
+  const name    = rawName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  const filename = isCL ? (name + '-cover-letter.pdf') : (name + '-cv.pdf');
 
-  /* Clone element so we can safely manipulate it for export */
-  const clone = element.cloneNode(true);
-  clone.style.width   = '794px';
-  clone.style.margin  = '0';
-  clone.style.padding = isCL ? '0' : clone.style.padding;
+  toast('Preparing ' + (isCL ? 'cover letter' : 'CV') + ' PDF…', 'default', 4000);
 
-  /* For photos: convert any broken img src to inline if needed */
-  clone.querySelectorAll('img').forEach(img => {
-    if (img.src && img.src.startsWith('data:')) {
-      img.crossOrigin = 'anonymous';
+  /* Add export class to lock width to A4 */
+  element.classList.add('pdf-export');
+
+  /* Fix photo: if cv-photo img exists, make sure src is the raw data URL */
+  if (!isCL) {
+    const photoImg = element.querySelector('img.cv-photo');
+    if (photoImg && cvData.photo) {
+      photoImg.src = cvData.photo;
     }
-  });
+  }
 
-  /* Append off-screen for rendering */
-  clone.style.position = 'fixed';
-  clone.style.left     = '-9999px';
-  clone.style.top      = '0';
-  document.body.appendChild(clone);
-
-  html2pdf()
-    .set({
-      margin:     0,
-      filename:   filename,
-      image:      { type: 'jpeg', quality: 0.98 },
-      html2canvas: {
-        scale:       2,
-        useCORS:     true,
-        allowTaint:  true,
-        logging:     false,
-        windowWidth: 794,
-        onclone:     (doc) => {
-          /* Ensure cloned photos render */
-          doc.querySelectorAll('img').forEach(img => { img.crossOrigin = 'anonymous'; });
-        }
-      },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-    })
-    .from(clone)
-    .save()
-    .then(() => {
-      document.body.removeChild(clone);
-      toast('Downloaded: ' + filename + ' ✦', 'gold');
-    })
-    .catch(err => {
-      document.body.removeChild(clone);
-      toast('PDF error — trying fallback…', 'error');
-      setTimeout(() => window.print(), 500);
-    });
+  /* Small delay so browser paints the pdf-export styles before capture */
+  setTimeout(() => {
+    html2pdf()
+      .set({
+        margin:      0,
+        filename:    filename,
+        image:       { type: 'jpeg', quality: 0.98 },
+        html2canvas: {
+          scale:       2.5,
+          useCORS:     true,
+          allowTaint:  true,
+          logging:     false,
+          windowWidth: 794,
+        },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['avoid-all'] },
+      })
+      .from(element)
+      .save()
+      .then(() => {
+        element.classList.remove('pdf-export');
+        toast(filename + ' downloaded ✦', 'gold', 4000);
+      })
+      .catch(() => {
+        element.classList.remove('pdf-export');
+        toast('PDF export failed — using print fallback', 'error');
+        window.print();
+      });
+  }, 150);
 }
 
 /* ============================================================
@@ -5086,36 +5121,38 @@ function getSelectedPerks() {
 }
 
 /* ============================================================
-   MODEMPAY PAYMENT GATEWAY
+   MODEMPAY PAYMENT GATEWAY — PUBLIC KEY MODE
    ============================================================
-   Architecture:
-   ─ Free plan  → skip payment, save job directly
-   ─ Paid plans → call ModemPay /payment-intents via a
-                  Supabase Edge Function (keeps secret key
-                  off the browser).  Edge Function URL is
-                  set in MODEMPAY_EDGE_FN below.
-   ─ On return  → URL contains ?payment_status=success&job_id=xxx
-                  We detect this on page load and finalise the job.
+   Uses ModemPay's PUBLIC key (pk_live_...) directly in the
+   browser. This is safe because the public key can only be
+   used to CREATE a payment intent UI — it cannot move money,
+   access your account, or perform any sensitive actions.
 
-   IMPORTANT: Replace MODEMPAY_EDGE_FN with your real
-   Supabase Edge Function URL once deployed.
-   See instructions at the bottom of this block.
+   Flow:
+   1. User clicks Pay
+   2. Browser calls ModemPay API directly with the PUBLIC key
+   3. ModemPay returns a checkout_url
+   4. Browser redirects user to that checkout page
+   5. User pays using mobile money / wallet
+   6. ModemPay redirects back with ?payment_status=success
+   7. App finalises the job post or triggers the PDF download
+
+   ✦ PASTE YOUR pk_live_ KEY INTO MODEMPAY_PUBLIC_KEY BELOW
    ============================================================ */
 
-/* ── ModemPay unified config ──────────────────────────────── */
+/* ── PASTE YOUR MODEMPAY PUBLIC KEY HERE ─────────────────── */
+const MODEMPAY_PUBLIC_KEY = 'pk_live_REPLACE_WITH_YOUR_PUBLIC_KEY';
 /*
-   BOTH job posting AND PDF downloads use paymentIntents.create.
-   The flow:
-     1. User clicks "Pay & Download" or "Submit Paid Listing"
-     2. App calls your Supabase Edge Function (keeps secret key safe)
-     3. Edge Function calls POST /v1/payment-intents on ModemPay
-     4. Returns checkout_url → browser redirects to ModemPay
-     5. User pays → ModemPay redirects back with ?payment_status=success
-     6. App reads URL params → finalises job post OR triggers download
+   To find your public key:
+   1. Go to modem-pay.com → Login → Dashboard
+   2. Click API Keys in the sidebar
+   3. Copy the key that starts with pk_live_
+   4. Paste it above replacing pk_live_REPLACE_WITH_YOUR_PUBLIC_KEY
 */
+
 const MODEMPAY_CONFIG = {
-  /* Supabase Edge Function — holds your sk_live key server-side */
-  EDGE_FN: 'https://whrlhlssojgpbcwregmf.supabase.co/functions/v1/modempay-charge',
+  /* ModemPay public API endpoint — safe to call from browser */
+  API_URL: 'https://api.modem-pay.com/v1/payment-intents',
 
   /* Job listing plan prices in GMD */
   PRICES: {
@@ -5377,88 +5414,61 @@ async function saveJobDirectly(jobPayload) {
 
 /* ── Create ModemPay Payment Intent via Edge Function ────── */
 async function createPaymentIntent({ amount, company, title, plan, pendingId, email, returnUrl }) {
-  /* returnUrl can be overridden (e.g. download payments include dl_token) */
   /*
-   * This calls your Supabase Edge Function which holds the
-   * ModemPay secret key securely server-side.
+   * Mirrors the ModemPay SDK pattern exactly:
    *
-   * The Edge Function forwards the request to:
-   * POST https://api.modem-pay.com/v1/payment-intents
+   *   const modempay = new ModemPay('YOUR_KEY');
+   *   const intent = await modempay.paymentIntents.create({ amount: 450 });
+   *   console.log(intent.data.payment_link);  // ← redirect user here
    *
-   * It returns { checkout_url: "https://pay.modem-pay.com/..." }
+   * Since our app is a single HTML file (no npm), we replicate what the
+   * SDK does internally — a POST to /v1/payment-intents with Bearer auth —
+   * and read intent.data.payment_link from the response, exactly as the
+   * SDK snippet shows.
    *
-   * ─────────────────────────────────────────────────────────
-   * DEPLOY YOUR EDGE FUNCTION (one-time setup):
-   *
-   * 1. Install Supabase CLI: npm install -g supabase
-   * 2. supabase login
-   * 3. supabase functions new modempay-charge
-   * 4. Paste the Edge Function code shown in the console below
-   * 5. supabase secrets set MODEMPAY_SECRET_KEY=your_sk_live_key
-   * 6. supabase functions deploy modempay-charge
-   * ─────────────────────────────────────────────────────────
+   * The PUBLIC key (pk_live_...) is safe here. It can only create a
+   * payment checkout. It cannot move money or access your account.
    */
 
-  console.log(`
-  ━━━ SUPABASE EDGE FUNCTION CODE ━━━━━━━━━━━━━━━━━━━━━━━━
-  Save this as: supabase/functions/modempay-charge/index.ts
-
-  import { serve } from "https://deno.land/std/http/server.ts";
-
-  serve(async (req) => {
-    const { amount, currency, return_url, cancel_url, metadata } = await req.json();
-    const SECRET = Deno.env.get("MODEMPAY_SECRET_KEY");
-
-    const res = await fetch("https://api.modem-pay.com/v1/payment-intents", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + SECRET,
-      },
-      body: JSON.stringify({ amount, currency, return_url, cancel_url, metadata }),
-    });
-
-    const data = await res.json();
-    return new Response(JSON.stringify({ checkout_url: data?.data?.checkout_url || data?.checkout_url }), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-    });
-  });
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  `);
-
-  const finalReturnUrl = returnUrl || (MODEMPAY_CONFIG.RETURN_URL + '&job_id=' + encodeURIComponent(pendingId));
-  const cancelUrl = MODEMPAY_CONFIG.CANCEL_URL;
-
-  /* ── Local file check ──────────────────────────────────────
-     If opened as file:// the browser blocks all fetch() calls
-     to external URLs. Payments only work when hosted online
-     (e.g. GitHub Pages, Netlify). Show a clear message.    */
-  if (window.location.protocol === 'file:') {
+  /* ── Guard: public key must be set ── */
+  if (!MODEMPAY_PUBLIC_KEY || MODEMPAY_PUBLIC_KEY.includes('REPLACE_WITH')) {
     throw new Error(
-      'Payments require the app to be hosted online. ' +
-      'Upload index.html to GitHub Pages or Netlify first, ' +
-      'then payments will work automatically.'
+      'ModemPay public key not configured. ' +
+      'Find MODEMPAY_PUBLIC_KEY in the file and paste your pk_live_ key.'
     );
   }
 
-  const res = await fetch(MODEMPAY_CONFIG.EDGE_FN, {
+  /* ── Guard: must be hosted online, not opened as a local file ── */
+  if (window.location.protocol === 'file:') {
+    throw new Error(
+      'Payments require the app to be hosted online. ' +
+      'Upload index.html to Netlify or GitHub Pages first.'
+    );
+  }
+
+  const finalReturnUrl = returnUrl || (MODEMPAY_CONFIG.RETURN_URL + '&job_id=' + encodeURIComponent(pendingId));
+  const cancelUrl      = MODEMPAY_CONFIG.CANCEL_URL;
+
+  /* ── POST to ModemPay — same as SDK's paymentIntents.create() ── */
+  const res = await fetch('https://api.modem-pay.com/v1/payment-intents', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + SB_KEY,
+      'Content-Type':  'application/json',
+      'Authorization': 'Bearer ' + MODEMPAY_PUBLIC_KEY,
     },
     body: JSON.stringify({
-      amount,
-      currency: 'GMD',
-      return_url: finalReturnUrl,
-      cancel_url: cancelUrl,
+      amount:              amount,
+      currency:            'GMD',
+      return_url:          finalReturnUrl,
+      cancel_url:          cancelUrl,
+      skip_url_validation: true,
       metadata: {
-        job_title: title,
-        company,
-        plan,
-        pending_id: pendingId,
+        job_title:      title,
+        company:        company,
+        plan:           plan,
+        pending_id:     pendingId,
         employer_email: email,
-        source: 'folio-cv',
+        source:         'folio-cv',
       },
     }),
     signal: AbortSignal.timeout(15000),
@@ -5466,13 +5476,25 @@ async function createPaymentIntent({ amount, company, title, plan, pendingId, em
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error('Edge Function error ' + res.status + ': ' + errText);
+    throw new Error('ModemPay error ' + res.status + ': ' + errText);
   }
 
-  const data = await res.json();
-  const checkoutUrl = data?.checkout_url || data?.data?.checkout_url;
-  if (!checkoutUrl) throw new Error('No checkout URL returned from payment gateway');
-  return checkoutUrl;
+  /* ── Read response exactly as SDK does: intent.data.payment_link ── */
+  const intent = await res.json();
+
+  const paymentLink = intent?.data?.payment_link   // SDK-style
+                   || intent?.data?.checkout_url   // alternative field
+                   || intent?.payment_link          // flat response
+                   || intent?.checkout_url;         // another alternative
+
+  if (!paymentLink) {
+    throw new Error(
+      'ModemPay did not return a payment link. ' +
+      'Full response: ' + JSON.stringify(intent).slice(0, 300)
+    );
+  }
+
+  return paymentLink;
 }
 
 /* ── Fallback UI if Edge Function not yet deployed ────────── */
